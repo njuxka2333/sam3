@@ -6,14 +6,16 @@ defaults:
 # Paths Configuration (Chage this to your own paths)
 # ============================================================================
 paths:
-  roboflow_vl_100_root: <YOUR_DATASET_DIR>
-  experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
-  bpe_path: <BPE_PATH> # This should be under sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  roboflow_vl_100_root: /jhcnas1/houjunlin/fxx/sam3_datasets/rf100-vl
+  experiment_log_dir: small_pathocell_fine_tune
+  bpe_path: /jhcnas1/houjunlin/fxx/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  checkpoint_path: /home/houjunlin/.cache/huggingface/hub/models--facebook--sam3/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt
 
 # Roboflow dataset configuration
 roboflow_train:
-  num_images: 100 # Note: This is the number of images used for training. If null, all images are used.
-  supercategory: ${all_roboflow_supercategories.${string:${submitit.job_array.task_index}}}
+  num_images: null # Note: This is the number of images used for training. If null, all images are used.
+  # supercategory: ${all_roboflow_supercategories.${string:${submitit.job_array.task_index}}}
+  supercategory: small_pathocell
 
   # Training transforms pipeline
   train_transforms:
@@ -30,7 +32,7 @@ roboflow_train:
           sizes:
             _target_: sam3.train.transforms.basic.get_random_resize_scales
             size: ${scratch.resolution}
-            min_size: 480
+            min_size: 160  # Adjusted for resolution 224 (must be <= resolution)
             rounded: false
           max_size:
             _target_: sam3.train.transforms.basic.get_random_resize_max_size
@@ -59,6 +61,7 @@ roboflow_train:
   val_transforms:
     - _target_: sam3.train.transforms.basic_for_api.ComposeAPI
       transforms:
+        - _target_: sam3.train.transforms.segmentation.DecodeRle
         - _target_: sam3.train.transforms.basic_for_api.RandomResizeAPI
           sizes: ${scratch.resolution}
           max_size:
@@ -136,11 +139,11 @@ roboflow_train:
   #       focal_alpha: 0.25
   #       focal_gamma: 2.0
   #       weight_dict:
-  #         loss_mask: 200.0
+  #         loss_mask: 20.0  # Reduced from 200.0 for pathocell dense annotations (33 objects/image vs 6 in -grccs)
   #         loss_dice: 10.0
   #       compute_aux: false
   #   loss_fn_semantic_seg:
-  #     _target_: sam3.losses.loss_fns.SemanticSegCriterion
+  #     _target_: sam3.train.loss.loss_fns.SemanticSegCriterion
   #     presence_head: True
   #     presence_loss: False  # Change
   #     focal: True
@@ -157,7 +160,7 @@ roboflow_train:
 # Different helper parameters and functions
 # ============================================================================
 scratch:
-  enable_segmentation: False # NOTE: This is the number of queries used for segmentation
+  enable_segmentation: False # NOTE: This is the number of queries used for segmentation (non-zero number enables segmentation, 0 or False disables it)
   # Model parameters
   d_model: 256
   pos_embed:
@@ -175,6 +178,18 @@ scratch:
     use_original_ids: true
     use_original_sizes_box: true
     use_presence: ${scratch.use_presence_eval}
+  
+  # Mask postprocessor for segmentation output
+  # mask_postprocessor_thresholded:
+  #   _target_: sam3.eval.postprocessors.PostProcessImage
+  #   max_dets_per_img: -1  # infinite detections
+  #   iou_type: "bbox"  # Enable segmentation mask output
+  #   use_original_ids: true
+  #   use_original_sizes_box: false
+  #   use_original_sizes_mask: true
+  #   convert_mask_to_rle: True  # Convert masks to RLE format for COCO
+  #   detection_threshold: 0.3
+  #   use_presence: ${scratch.use_presence_eval}
 
   # Matcher configuration
   matcher:
@@ -189,7 +204,7 @@ scratch:
   scale_by_find_batch_size: True
 
   # Image processing parameters
-  resolution: 1008
+  resolution: 224
   consistent_transform: False
   max_ann_per_img: 200
 
@@ -200,7 +215,7 @@ scratch:
   val_norm_std: [0.5, 0.5, 0.5]
 
   # Training parameters
-  num_train_workers: 10
+  num_train_workers: 1
   num_val_workers: 0
   max_data_epochs: 20
   target_epoch_size: 1500
@@ -219,7 +234,7 @@ scratch:
   scheduler_warmup: 20
   scheduler_cooldown: 20
 
-  val_batch_size: 1
+  val_batch_size: 4
   collate_fn_val:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
@@ -228,7 +243,7 @@ scratch:
     with_seg_masks: ${scratch.enable_segmentation} # Note: Set this to true if using segmentation masks!
 
   gradient_accumulation_steps: 1
-  train_batch_size: 1
+  train_batch_size: 4
   collate_fn:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
@@ -243,13 +258,13 @@ scratch:
 trainer:
 
   _target_: sam3.train.trainer.Trainer
-  skip_saving_ckpts: true
+  skip_saving_ckpts: False
   empty_gpu_mem_cache_after_eval: True
   skip_first_val: True
   max_epochs: 20
   accelerator: cuda
   seed_value: 123
-  val_epoch_freq: 10
+  val_epoch_freq: 5
   mode: train
   gradient_accumulation_steps: ${scratch.gradient_accumulation_steps}
 
@@ -315,9 +330,11 @@ trainer:
   model:
     _target_: sam3.model_builder.build_sam3_image_model
     bpe_path: ${paths.bpe_path}
+    checkpoint_path: ${paths.checkpoint_path}
     device: cpus
     eval_mode: false
     enable_segmentation: ${scratch.enable_segmentation} # Warning: Enable this if using segmentation.
+    resolution: ${scratch.resolution}
 
   meters:
     val:
@@ -335,6 +352,22 @@ trainer:
               gt_path: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/test/_annotations.coco.json
               tide: False
               iou_type: "bbox"
+
+    # val:
+    #   roboflow100:
+    #     segmentation:  # Only output segmentation masks (no bbox)
+    #       _target_: sam3.eval.coco_writer.PredictionDumper
+    #       iou_type: "segm"  # Enable segmentation mask output
+    #       dump_dir: ${launcher.experiment_log_dir}/dumps/roboflow/${roboflow_train.supercategory}
+    #       merge_predictions: True
+    #       postprocessor: ${scratch.mask_postprocessor_thresholded}
+    #       gather_pred_via_filesys: ${scratch.gather_pred_via_filesys}
+    #       maxdets: 100
+    #       pred_file_evaluators:
+    #         - _target_: sam3.eval.coco_eval_offline.CocoEvaluatorOfflineWithPredFileEvaluators
+    #           gt_path: ${paths.roboflow_vl_100_root}/${roboflow_train.supercategory}/test/_annotations.coco.json
+    #           tide: False
+    #           iou_type: "segm"  # Evaluate segmentation masks
 
   optim:
     amp:
@@ -396,7 +429,7 @@ trainer:
 
   checkpoint:
     save_dir: ${launcher.experiment_log_dir}/checkpoints
-    save_freq: 0  # 0 only last checkpoint is saved.
+    save_freq: 10  # 0 only last checkpoint is saved.
 
   logging:
     tensorboard_writer:
@@ -414,7 +447,7 @@ trainer:
 
 launcher:
   num_nodes: 1
-  gpus_per_node: 2
+  gpus_per_node: 1
   experiment_log_dir: ${paths.experiment_log_dir}
   multiprocessing_context: forkserver
 
@@ -423,14 +456,16 @@ submitit:
   partition: null
   qos: null
   timeout_hour: 72
-  use_cluster: True
-  cpus_per_task: 10
+  use_cluster: False
+  # use_cluster: True
+  cpus_per_task: 2
   port_range: [10000, 65000]
   constraint: null
-  # Uncomment for job array configuration
-  job_array:
-    num_tasks: 100
-    task_index: 0
+  # Job array configuration - COMMENTED OUT for single job testing
+  # Uncomment below to run 100 jobs in parallel (one per supercategory)
+  # job_array:
+  #   num_tasks: 100
+  #   task_index: 0
 
 # ============================================================================
 # Available Roboflow Supercategories (for reference)

@@ -57,8 +57,10 @@ def _setup_tf32() -> None:
 _setup_tf32()
 
 
-def _create_position_encoding(precompute_resolution=None):
+def _create_position_encoding(precompute_resolution=None, resolution=224):
     """Create position encoding for visual backbone."""
+    if precompute_resolution is None:
+        precompute_resolution = resolution
     return PositionEmbeddingSine(
         num_pos_feats=256,
         normalize=True,
@@ -68,10 +70,10 @@ def _create_position_encoding(precompute_resolution=None):
     )
 
 
-def _create_vit_backbone(compile_mode=None):
+def _create_vit_backbone(compile_mode=None, resolution=224):
     """Create ViT backbone for visual feature extraction."""
     return ViT(
-        img_size=1008,
+        img_size=resolution,
         pretrain_img_size=336,
         patch_size=14,
         embed_dim=1024,
@@ -152,7 +154,7 @@ def _create_transformer_encoder() -> TransformerEncoderFusion:
     return encoder
 
 
-def _create_transformer_decoder() -> TransformerDecoder:
+def _create_transformer_decoder(resolution=224) -> TransformerDecoder:
     """Create transformer decoder with its layer."""
     decoder_layer = TransformerDecoderLayer(
         activation="relu",
@@ -181,7 +183,7 @@ def _create_transformer_decoder() -> TransformerDecoder:
         frozen=False,
         interaction_layer=None,
         dac_use_selfatt_ln=True,
-        resolution=1008,
+        resolution=resolution,
         stride=14,
         use_act_checkpoint=True,
         presence_token=True,
@@ -231,10 +233,10 @@ def _create_segmentation_head(compile_mode=None):
     return segmentation_head
 
 
-def _create_geometry_encoder():
+def _create_geometry_encoder(resolution=224):
     """Create geometry encoder with all its components."""
     # Create position encoding for geometry encoder
-    geo_pos_enc = _create_position_encoding()
+    geo_pos_enc = _create_position_encoding(resolution=resolution)
     # Create CX block for fuser
     cx_block = CXBlock(
         dim=256,
@@ -329,7 +331,7 @@ def _create_sam3_model(
     return model
 
 
-def _create_tracker_maskmem_backbone():
+def _create_tracker_maskmem_backbone(resolution=224):
     """Create the SAM3 Tracker memory encoder."""
     # Position encoding for mask memory backbone
     position_encoding = PositionEmbeddingSine(
@@ -337,12 +339,14 @@ def _create_tracker_maskmem_backbone():
         normalize=True,
         scale=None,
         temperature=10000,
-        precompute_resolution=1008,
+        precompute_resolution=resolution,
     )
 
     # Mask processing components
+    # interpol_size is set to ~1.14x resolution (similar to original 1152/1008 ratio)
+    interpol_size_val = int(resolution * 1.14)
     mask_downsampler = SimpleMaskDownSampler(
-        kernel_size=3, stride=2, padding=1, interpol_size=[1152, 1152]
+        kernel_size=3, stride=2, padding=1, interpol_size=[interpol_size_val, interpol_size_val]
     )
 
     cx_block_layer = CXBlock(
@@ -365,8 +369,14 @@ def _create_tracker_maskmem_backbone():
     return maskmem_backbone
 
 
-def _create_tracker_transformer():
+def _create_tracker_transformer(resolution=224):
     """Create the SAM3 Tracker transformer components."""
+    # Calculate feat_sizes based on resolution and stride
+    # feat_sizes = [H, W] where H=W=resolution/stride (stride=14 for backbone)
+    backbone_stride = 14
+    feat_size = resolution // backbone_stride
+    feat_sizes = [feat_size, feat_size]
+    
     # Self attention
     self_attention = RoPEAttention(
         embedding_dim=256,
@@ -374,7 +384,7 @@ def _create_tracker_transformer():
         downsample_rate=1,
         dropout=0.1,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=feat_sizes,
         use_fa3=False,
         use_rope_real=False,
     )
@@ -387,7 +397,7 @@ def _create_tracker_transformer():
         dropout=0.1,
         kv_in_dim=64,
         rope_theta=10000.0,
-        feat_sizes=[72, 72],
+        feat_sizes=feat_sizes,
         rope_k_repeat=True,
         use_fa3=False,
         use_rope_real=False,
@@ -431,7 +441,7 @@ def _create_tracker_transformer():
 
 
 def build_tracker(
-    apply_temporal_disambiguation: bool, with_backbone: bool = False, compile_mode=None
+    apply_temporal_disambiguation: bool, with_backbone: bool = False, compile_mode=None, resolution=224
 ) -> Sam3TrackerPredictor:
     """
     Build the SAM3 Tracker module for video tracking.
@@ -441,15 +451,15 @@ def build_tracker(
     """
 
     # Create model components
-    maskmem_backbone = _create_tracker_maskmem_backbone()
-    transformer = _create_tracker_transformer()
+    maskmem_backbone = _create_tracker_maskmem_backbone(resolution=resolution)
+    transformer = _create_tracker_transformer(resolution=resolution)
     backbone = None
     if with_backbone:
-        vision_backbone = _create_vision_backbone(compile_mode=compile_mode)
+        vision_backbone = _create_vision_backbone(compile_mode=compile_mode, resolution=resolution)
         backbone = SAM3VLBackbone(scalp=1, visual=vision_backbone, text=None)
     # Create the Tracker module
     model = Sam3TrackerPredictor(
-        image_size=1008,
+        image_size=resolution,
         num_maskmem=7,
         backbone=backbone,
         backbone_stride=14,
@@ -498,13 +508,13 @@ def _create_text_encoder(bpe_path: str) -> VETextEncoder:
 
 
 def _create_vision_backbone(
-    compile_mode=None, enable_inst_interactivity=True
+    compile_mode=None, enable_inst_interactivity=True, resolution=224
 ) -> Sam3DualViTDetNeck:
     """Create SAM3 visual backbone with ViT and neck."""
     # Position encoding
-    position_encoding = _create_position_encoding(precompute_resolution=1008)
+    position_encoding = _create_position_encoding(precompute_resolution=resolution, resolution=resolution)
     # ViT backbone
-    vit_backbone: ViT = _create_vit_backbone(compile_mode=compile_mode)
+    vit_backbone: ViT = _create_vit_backbone(compile_mode=compile_mode, resolution=resolution)
     vit_neck: Sam3DualViTDetNeck = _create_vit_neck(
         position_encoding,
         vit_backbone,
@@ -514,16 +524,22 @@ def _create_vision_backbone(
     return vit_neck
 
 
-def _create_sam3_transformer(has_presence_token: bool = True) -> TransformerWrapper:
+def _create_sam3_transformer(has_presence_token: bool = True, resolution=224) -> TransformerWrapper:
     """Create SAM3 transformer encoder and decoder."""
     encoder: TransformerEncoderFusion = _create_transformer_encoder()
-    decoder: TransformerDecoder = _create_transformer_decoder()
+    decoder: TransformerDecoder = _create_transformer_decoder(resolution=resolution)
 
     return TransformerWrapper(encoder=encoder, decoder=decoder, d_model=256)
 
 
 def _load_checkpoint(model, checkpoint_path):
-    """Load model checkpoint from file."""
+    """Load model checkpoint from file.
+    
+    This function handles checkpoint loading with resolution mismatches.
+    Position embeddings and other resolution-dependent parameters will be
+    automatically skipped if sizes don't match, which is expected when
+    changing resolution (e.g., from 1008 to 224).
+    """
     with g_pathmgr.open(checkpoint_path, "rb") as f:
         ckpt = torch.load(f, map_location="cpu", weights_only=True)
     if "model" in ckpt and isinstance(ckpt["model"], dict):
@@ -539,12 +555,67 @@ def _load_checkpoint(model, checkpoint_path):
                 if "tracker" in k
             }
         )
-    missing_keys, _ = model.load_state_dict(sam3_image_ckpt, strict=False)
-    if len(missing_keys) > 0:
-        print(
-            f"loaded {checkpoint_path} and found "
-            f"missing and/or unexpected keys:\n{missing_keys=}"
-        )
+    
+    # Filter out position embeddings and other resolution-dependent parameters
+    # that may have size mismatches. These will be re-initialized for the new resolution.
+    filtered_ckpt = {}
+    skipped_keys = []
+    model_state_dict = model.state_dict()
+    
+    for key, value in sam3_image_ckpt.items():
+        if key in model_state_dict:
+            model_shape = model_state_dict[key].shape
+            ckpt_shape = value.shape
+            
+            # Skip if shapes don't match (likely resolution-dependent parameters)
+            if model_shape != ckpt_shape:
+                # Position embeddings and related parameters are expected to be skipped
+                if any(x in key.lower() for x in ['pos_embed', 'position', 'rope', 'freqs_cis']):
+                    skipped_keys.append(f"{key} (shape mismatch: {ckpt_shape} -> {model_shape}, expected for resolution change)")
+                else:
+                    skipped_keys.append(f"{key} (shape mismatch: {ckpt_shape} -> {model_shape})")
+            else:
+                filtered_ckpt[key] = value
+        else:
+            skipped_keys.append(f"{key} (not in model)")
+    
+    # Load the filtered checkpoint
+    missing_keys, unexpected_keys = model.load_state_dict(filtered_ckpt, strict=False)
+    
+    # Log skipped keys (these are expected when changing resolution)
+    if skipped_keys:
+        print(f"\n[Checkpoint Loading] Skipped {len(skipped_keys)} keys due to resolution mismatch:")
+        for key in skipped_keys[:20]:  # Show first 20
+            print(f"  - {key}")
+        if len(skipped_keys) > 20:
+            print(f"  ... and {len(skipped_keys) - 20} more keys")
+        print("  (This is expected when changing resolution. Position embeddings will be re-initialized.)\n")
+    
+    # Log missing keys (parameters in model but not in checkpoint)
+    if missing_keys:
+        # Filter out position embeddings from missing keys (expected)
+        pos_embed_missing = [k for k in missing_keys if any(x in k.lower() for x in ['pos_embed', 'position', 'rope', 'freqs_cis'])]
+        other_missing = [k for k in missing_keys if k not in pos_embed_missing]
+        
+        if other_missing:
+            print(f"[Checkpoint Loading] Missing keys (not in checkpoint): {len(other_missing)}")
+            for key in other_missing[:10]:
+                print(f"  - {key}")
+            if len(other_missing) > 10:
+                print(f"  ... and {len(other_missing) - 10} more")
+        
+        if pos_embed_missing:
+            print(f"[Checkpoint Loading] Position embeddings re-initialized for new resolution: {len(pos_embed_missing)} parameters")
+    
+    # Log unexpected keys (parameters in checkpoint but not in model)
+    if unexpected_keys:
+        print(f"[Checkpoint Loading] Unexpected keys (in checkpoint but not in model): {len(unexpected_keys)}")
+        for key in unexpected_keys[:10]:
+            print(f"  - {key}")
+        if len(unexpected_keys) > 10:
+            print(f"  ... and {len(unexpected_keys) - 10} more")
+    
+    print(f"[Checkpoint Loading] Successfully loaded {len(filtered_ckpt)} parameters from {checkpoint_path}")
 
 
 def _setup_device_and_mode(model, device, eval_mode):
@@ -565,6 +636,7 @@ def build_sam3_image_model(
     enable_segmentation=True,
     enable_inst_interactivity=False,
     compile=False,
+    resolution=224,
 ):
     """
     Build SAM3 image model
@@ -577,6 +649,7 @@ def build_sam3_image_model(
         enable_segmentation: Whether to enable segmentation head
         enable_inst_interactivity: Whether to enable instance interactivity (SAM 1 task)
         compile_mode: To enable compilation, set to "default"
+        resolution: Image resolution (default: 224)
 
     Returns:
         A SAM3 image model
@@ -589,7 +662,7 @@ def build_sam3_image_model(
     # Create visual components
     compile_mode = "default" if compile else None
     vision_encoder = _create_vision_backbone(
-        compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity
+        compile_mode=compile_mode, enable_inst_interactivity=enable_inst_interactivity, resolution=resolution
     )
 
     # Create text components
@@ -599,7 +672,7 @@ def build_sam3_image_model(
     backbone = _create_vl_backbone(vision_encoder, text_encoder)
 
     # Create transformer components
-    transformer = _create_sam3_transformer()
+    transformer = _create_sam3_transformer(resolution=resolution)
 
     # Create dot product scoring
     dot_prod_scoring = _create_dot_product_scoring()
@@ -612,9 +685,9 @@ def build_sam3_image_model(
     )
 
     # Create geometry encoder
-    input_geometry_encoder = _create_geometry_encoder()
+    input_geometry_encoder = _create_geometry_encoder(resolution=resolution)
     if enable_inst_interactivity:
-        sam3_pvs_base = build_tracker(apply_temporal_disambiguation=False)
+        sam3_pvs_base = build_tracker(apply_temporal_disambiguation=False, resolution=resolution)
         inst_predictor = SAM3InteractiveImagePredictor(sam3_pvs_base)
     else:
         inst_predictor = None

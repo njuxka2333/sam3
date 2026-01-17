@@ -6,13 +6,14 @@ defaults:
 # Paths Configuration (Chage this to your own paths)
 # ============================================================================
 paths:
-  roboflow_vl_100_root: <YOUR_DATASET_DIR>
-  experiment_log_dir: <YOUR EXPERIMENET LOG_DIR>
-  bpe_path: <BPE_PATH> # This should be under sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  roboflow_vl_100_root: /jhcnas1/houjunlin/fxx/sam3_datasets/rf100-vl
+  experiment_log_dir: roboflow_eval
+  bpe_path: /jhcnas1/houjunlin/fxx/sam3/sam3/assets/bpe_simple_vocab_16e6.txt.gz # This should be under sam3/assets/bpe_simple_vocab_16e6.txt.gz
+  checkpoint_path: /home/houjunlin/.cache/huggingface/hub/models--facebook--sam3/models--facebook--sam3/snapshots/2afe64078f4420bdfbc063162d1336003efadc81/sam3.pt
 
 # Roboflow dataset configuration
 roboflow_train:
-  num_images: 100 # Note: This is the number of images used for training. If null, all images are used.
+  num_images: null # Note: This is the number of images used for training. If null, all images are used.
   supercategory: ${all_roboflow_supercategories.${string:${submitit.job_array.task_index}}}
 
   # Training transforms pipeline
@@ -30,7 +31,7 @@ roboflow_train:
           sizes:
             _target_: sam3.train.transforms.basic.get_random_resize_scales
             size: ${scratch.resolution}
-            min_size: 480
+            min_size: 160
             rounded: false
           max_size:
             _target_: sam3.train.transforms.basic.get_random_resize_max_size
@@ -189,7 +190,7 @@ scratch:
   scale_by_find_batch_size: True
 
   # Image processing parameters
-  resolution: 1008
+  resolution: 224
   consistent_transform: False
   max_ann_per_img: 200
 
@@ -200,7 +201,7 @@ scratch:
   val_norm_std: [0.5, 0.5, 0.5]
 
   # Training parameters
-  num_train_workers: 10
+  num_train_workers: 1
   num_val_workers: 0
   max_data_epochs: 20
   target_epoch_size: 1500
@@ -219,7 +220,7 @@ scratch:
   scheduler_warmup: 20
   scheduler_cooldown: 20
 
-  val_batch_size: 1
+  val_batch_size: 12
   collate_fn_val:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
@@ -228,7 +229,7 @@ scratch:
     with_seg_masks: ${scratch.enable_segmentation} # Note: Set this to true if using segmentation masks!
 
   gradient_accumulation_steps: 1
-  train_batch_size: 1
+  train_batch_size: 4
   collate_fn:
     _target_: sam3.train.data.collator.collate_fn_api
     _partial_: true
@@ -249,7 +250,7 @@ trainer:
   max_epochs: 20
   accelerator: cuda
   seed_value: 123
-  val_epoch_freq: 10
+  val_epoch_freq: 5
   mode: val
   gradient_accumulation_steps: ${scratch.gradient_accumulation_steps}
 
